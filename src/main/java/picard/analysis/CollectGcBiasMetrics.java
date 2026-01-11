@@ -34,9 +34,6 @@ import htsjdk.samtools.util.IOUtil;
 import htsjdk.samtools.util.Interval;
 import htsjdk.samtools.util.IntervalList;
 import htsjdk.samtools.util.Log;
-import htsjdk.tribble.AbstractFeatureReader;
-import htsjdk.tribble.CloseableTribbleIterator;
-import htsjdk.tribble.FeatureReader;
 import htsjdk.tribble.bed.BEDCodec;
 import htsjdk.tribble.bed.BEDFeature;
 import org.broadinstitute.barclay.argparser.Argument;
@@ -193,13 +190,9 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
         IntervalList intervalsToExclude = null;
         if (EXCLUDE_INTERVALS != null) {
             IOUtil.assertFileIsReadable(EXCLUDE_INTERVALS);
-            // IntervalList.fromFile works for interval_list format
-            // For BED files, we need to manually load using BEDCodec with the sequence dictionary
-            if (EXCLUDE_INTERVALS.getName().endsWith(".bed")) {
-                intervalsToExclude = loadBedFile(EXCLUDE_INTERVALS, header.getSequenceDictionary());
-            } else {
-                intervalsToExclude = IntervalList.fromFile(EXCLUDE_INTERVALS);
-            }
+            // Always buffer content and detect format by examining the first line.
+            // This works for both regular files and special files (pipes, FIFOs, process substitutions).
+            intervalsToExclude = loadIntervalsFromStream(EXCLUDE_INTERVALS, header.getSequenceDictionary());
 
             // Log information about excluded regions
             final int numExcludedRegions = intervalsToExclude.getIntervals().size();
@@ -263,19 +256,108 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
     }
 
     /**
-     * Helper method to load a BED file into an IntervalList using the provided sequence dictionary.
+     * Enum for interval file formats.
      */
-    private static IntervalList loadBedFile(final File bedFile, final SAMSequenceDictionary dictionary) {
+    private enum IntervalFileFormat {
+        INTERVAL_LIST,
+        BED,
+        UNKNOWN
+    }
+
+    private static class FormatDetectionResult {
+        final IntervalFileFormat format;
+        final String firstLine;
+
+        FormatDetectionResult(final IntervalFileFormat format, final String firstLine) {
+            this.format = format;
+            this.firstLine = firstLine;
+        }
+    }
+
+    /**
+     * Detects the interval file format by reading the first non-empty, non-header line.
+     * Skips BED headers (lines starting with #, track, or browser) and interval_list headers (lines starting with @).
+     * Returns the detected format and the first data line (for error reporting).
+     */
+    private static FormatDetectionResult detectIntervalFormat(final java.io.BufferedReader reader) throws java.io.IOException {
+        String line;
+
+        // Read until we find first non-empty, non-header line
+        while ((line = reader.readLine()) != null) {
+            final String trimmed = line.trim();
+
+            // Skip empty lines and BED headers (#, track, browser)
+            if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("track") || trimmed.startsWith("browser")) {
+                continue;
+            }
+
+            // Found first significant line - check format
+            // interval_list starts with @ (SAM headers like @HD, @SQ)
+            // BED format has at least 3 tab-separated fields (chrom, start, end)
+            if (trimmed.startsWith("@")) {
+                return new FormatDetectionResult(IntervalFileFormat.INTERVAL_LIST, null);
+            } else if (trimmed.split("\t").length >= 3) {
+                // looks like BED format (at least 3 tab-separated fields)
+                return new FormatDetectionResult(IntervalFileFormat.BED, null);
+            } else {
+                return new FormatDetectionResult(IntervalFileFormat.UNKNOWN, trimmed);
+            }
+        }
+
+        // Empty file or only headers
+        return new FormatDetectionResult(IntervalFileFormat.UNKNOWN, null);
+    }
+
+    /**
+     * Load intervals from a stream by sniffing the first significant line to detect format.
+     * Uses mark/reset with an 8KB buffer for interval_list format (which has headers).
+     * For BED format, only reads one line before detecting format.
+     */
+    private static IntervalList loadIntervalsFromStream(final File file, final SAMSequenceDictionary dictionary) {
+        FormatDetectionResult detectedFormat;
+        IntervalList result;
+
+        try (final java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file))) {
+            // Mark with 8KB buffer - enough for typical interval_list headers
+            reader.mark(8192);
+
+            // Detect format by reading first significant line
+            detectedFormat = detectIntervalFormat(reader);
+
+            // Reset to beginning for format-specific parsing
+            reader.reset();
+
+            result = switch (detectedFormat.format) {
+                case INTERVAL_LIST -> IntervalList.fromReader(reader);
+                case BED -> parseBedFromReader(reader, dictionary);
+                case UNKNOWN -> throw new PicardException("Invalid interval file format. Expected either interval_list (starting with @) or BED format (at least 3 tab-separated fields). First data line: " + detectedFormat.firstLine);
+            };
+        } catch (final java.io.IOException e) {
+            throw new PicardException("Error reading intervals from " + file, e);
+        }
+
+        return result;
+    }
+
+    /**
+     * Parse BED format from a reader using BEDCodec.
+     */
+    private static IntervalList parseBedFromReader(final java.io.BufferedReader reader, final SAMSequenceDictionary dictionary)
+            throws java.io.IOException {
         final SAMFileHeader header = new SAMFileHeader();
         header.setSequenceDictionary(dictionary);
         final IntervalList intervalList = new IntervalList(header);
+        final BEDCodec codec = new BEDCodec();
 
-        try (final FeatureReader<BEDFeature> bedReader = AbstractFeatureReader.getFeatureReader(
-                bedFile.getAbsolutePath(), new BEDCodec(), false);
-             final CloseableTribbleIterator<BEDFeature> iterator = bedReader.iterator()) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+            final String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("track") || trimmed.startsWith("browser")) {
+                continue;
+            }
 
-            while (iterator.hasNext()) {
-                final BEDFeature bedFeature = iterator.next();
+            try {
+                final BEDFeature bedFeature = codec.decode(trimmed);
                 final String contig = bedFeature.getContig();
                 final int start = bedFeature.getStart();
                 final int end = bedFeature.getEnd();
@@ -285,13 +367,13 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
                     throw new PicardException("Contig " + contig + " from BED file not found in sequence dictionary");
                 }
 
-                final Interval interval = new Interval(contig, start, end);
-                intervalList.add(interval);
+                intervalList.add(new Interval(contig, start, end));
+            } catch (final Exception e) {
+                throw new PicardException("Error parsing BED line: " + line, e);
             }
-        } catch (final Exception e) {
-            throw new PicardException("Error reading BED file: " + bedFile, e);
         }
 
         return intervalList.uniqued();
     }
+
 }

@@ -6,8 +6,12 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 import picard.PicardException;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 /**
  * @author nhomer
@@ -61,16 +65,39 @@ public class BedToIntervalListTest {
         doTest(inputBed, "header.sam", false);
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class)
-    public void testRejectStdin() throws IOException {
-        final BedToIntervalList program = new BedToIntervalList();
-        final File outputFile  = File.createTempFile("bed_to_interval_list_test.", ".interval_list");
-        outputFile.deleteOnExit();
-        program.OUTPUT = outputFile;
-        program.SEQUENCE_DICTIONARY = new File(TEST_DATA_DIR, "header.sam");
-        program.UNIQUE = true;
-        program.INPUT = new File("/dev/stdin");
-        program.doWork();
+    @Test(expectedExceptions = PicardException.class)
+    public void testRejectIntervalListInput() throws IOException {
+        // Feeding an interval_list file (which starts with @ SAM headers) to BedToIntervalList
+        // should throw a clear PicardException rather than a confusing NumberFormatException.
+        doTest("seq_dict_test.dictionary.interval_list", "header.sam", true);
+    }
+
+    @Test
+    public void testStdinSupport() throws IOException {
+        // Feed the contents of simple.bed through System.in and verify the output matches
+        // the expected interval_list — proving that /dev/stdin is now fully supported.
+        final File simpleBed = new File(TEST_DATA_DIR, "simple.bed");
+        final byte[] bedBytes = Files.readAllBytes(simpleBed.toPath());
+
+        final InputStream originalIn = System.in;
+        try {
+            System.setIn(new ByteArrayInputStream(bedBytes));
+
+            final File outputFile = File.createTempFile("bed_to_interval_list_stdin_test.", ".interval_list");
+            outputFile.deleteOnExit();
+
+            final BedToIntervalList program = new BedToIntervalList();
+            program.INPUT = new File("/dev/stdin");
+            program.SEQUENCE_DICTIONARY = new File(TEST_DATA_DIR, "header.sam");
+            program.OUTPUT = outputFile;
+            program.UNIQUE = true;
+
+            program.doWork();
+
+            IOUtil.assertFilesEqual(new File(simpleBed.getAbsolutePath() + ".interval_list"), outputFile);
+        } finally {
+            System.setIn(originalIn);
+        }
     }
 
     @DataProvider

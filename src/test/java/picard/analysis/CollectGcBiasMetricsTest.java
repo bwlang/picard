@@ -699,7 +699,6 @@ public class CollectGcBiasMetricsTest extends CommandLineProgramTest {
         // To exclude chrM:330-340 (1-based inclusive), write chrM 329 340 in BED format
         try (final FileWriter writer = new FileWriter(bedFile)) {
             writer.write("# Exclude chrM:330-340\n");
-            writer.write("track name=\"Excluded regions\"\n");
             writer.write("chrM\t329\t340\n");
         }
 

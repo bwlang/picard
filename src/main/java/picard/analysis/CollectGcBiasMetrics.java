@@ -34,8 +34,9 @@ import htsjdk.samtools.util.IOUtil;
 import htsjdk.samtools.util.Interval;
 import htsjdk.samtools.util.IntervalList;
 import htsjdk.samtools.util.Log;
-import htsjdk.tribble.bed.BEDCodec;
-import htsjdk.tribble.bed.BEDFeature;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
 import org.broadinstitute.barclay.argparser.Argument;
 import org.broadinstitute.barclay.argparser.CommandLineProgramProperties;
 import org.broadinstitute.barclay.help.DocumentedFeature;
@@ -279,7 +280,7 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
      * Skips BED headers (lines starting with #, track, or browser) and interval_list headers (lines starting with @).
      * Returns the detected format and the first data line (for error reporting).
      */
-    private static FormatDetectionResult detectIntervalFormat(final java.io.BufferedReader reader) throws java.io.IOException {
+    private static FormatDetectionResult detectIntervalFormat(final BufferedReader reader) throws IOException {
         String line;
 
         // Read until we find first non-empty, non-header line
@@ -317,9 +318,11 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
         FormatDetectionResult detectedFormat;
         IntervalList result;
 
-        try (final java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file))) {
-            // Mark with 8KB buffer - enough for typical interval_list headers
-            reader.mark(8192);
+        try (final BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            // Mark with 8 KB buffer - enough for any realistic preamble/header section.
+            // BufferedReader.mark() is backed by an in-memory char array, so this also
+            // works correctly for non-seekable sources such as pipes and FIFOs.
+            reader.mark(8 * 1024);
 
             // Detect format by reading first significant line
             detectedFormat = detectIntervalFormat(reader);
@@ -332,7 +335,7 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
                 case BED -> parseBedFromReader(reader, dictionary);
                 case UNKNOWN -> throw new PicardException("Invalid interval file format. Expected either interval_list (starting with @) or BED format (at least 3 tab-separated fields). First data line: " + detectedFormat.firstLine);
             };
-        } catch (final java.io.IOException e) {
+        } catch (final IOException e) {
             throw new PicardException("Error reading intervals from " + file, e);
         }
 
@@ -340,14 +343,15 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
     }
 
     /**
-     * Parse BED format from a reader using BEDCodec.
+     * Parse BED format line-by-line from a reader.
+     * BED coordinates are 0-based half-open [start, end); htsjdk Interval is 1-based closed [start, end].
+     * Conversion: interval.start = bed.start + 1, interval.end = bed.end.
      */
-    private static IntervalList parseBedFromReader(final java.io.BufferedReader reader, final SAMSequenceDictionary dictionary)
-            throws java.io.IOException {
+    private static IntervalList parseBedFromReader(final BufferedReader reader, final SAMSequenceDictionary dictionary)
+            throws IOException {
         final SAMFileHeader header = new SAMFileHeader();
         header.setSequenceDictionary(dictionary);
         final IntervalList intervalList = new IntervalList(header);
-        final BEDCodec codec = new BEDCodec();
 
         String line;
         while ((line = reader.readLine()) != null) {
@@ -356,21 +360,19 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
                 continue;
             }
 
-            try {
-                final BEDFeature bedFeature = codec.decode(trimmed);
-                final String contig = bedFeature.getContig();
-                final int start = bedFeature.getStart();
-                final int end = bedFeature.getEnd();
-
-                // Verify contig exists in dictionary
-                if (dictionary.getSequence(contig) == null) {
-                    throw new PicardException("Contig " + contig + " from BED file not found in sequence dictionary");
-                }
-
-                intervalList.add(new Interval(contig, start, end));
-            } catch (final Exception e) {
-                throw new PicardException("Error parsing BED line: " + line, e);
+            final String[] fields = trimmed.split("	");
+            if (fields.length < 3) {
+                throw new PicardException("Invalid BED line (fewer than 3 tab-separated fields): " + line);
             }
+            final String contig = fields[0];
+            final int start = Integer.parseInt(fields[1]) + 1; // BED start is 0-based; convert to 1-based
+            final int end = Integer.parseInt(fields[2]); // BED end is 0-based exclusive == 1-based inclusive
+
+            if (dictionary.getSequence(contig) == null) {
+                throw new PicardException("Contig " + contig + " from BED file not found in sequence dictionary");
+            }
+
+            intervalList.add(new Interval(contig, start, end));
         }
 
         return intervalList.uniqued();

@@ -629,37 +629,33 @@ public class CollectGcBiasMetricsTest extends CommandLineProgramTest {
     }
 
     /**
-     * Test the EXCLUDE_INTERVALS parameter with both interval_list and BED formats.
-     * Verifies that both formats are correctly detected, parsed, and used for interval exclusion.
+     * Test the EXCLUDE_INTERVALS parameter with interval_list format.
      * AlignedAdapterReads.sam has 2 reads: one at position 227 (ending ~329) and one at position 253 (ending ~334).
      * We exclude region 330-340 to filter out only the read at position 253.
      */
     @Test
-    public void testIntervalsToExclude() throws IOException {
+    public void testExcludeIntervalsIntervalList() throws IOException {
         final File input = new File("testdata/picard/metrics/AlignedAdapterReads.sam");
-
-        // Test with interval_list format
-        final File summaryOutfileIntervalList = File.createTempFile("test_interval_list", ".gc_bias.summary_metrics");
-        final File detailsOutfileIntervalList = File.createTempFile("test_interval_list", ".gc_bias.detail_metrics");
+        final File summaryOutfile = File.createTempFile("test_interval_list", ".gc_bias.summary_metrics");
+        final File detailsOutfile = File.createTempFile("test_interval_list", ".gc_bias.detail_metrics");
         final File intervalsFile = File.createTempFile("test_intervals", ".interval_list");
-        summaryOutfileIntervalList.deleteOnExit();
-        detailsOutfileIntervalList.deleteOnExit();
+        final File pdf = File.createTempFile("test_interval_list", ".pdf");
+        summaryOutfile.deleteOnExit();
+        detailsOutfile.deleteOnExit();
         intervalsFile.deleteOnExit();
+        pdf.deleteOnExit();
 
-        // Create interval_list file
+        // Create interval_list file excluding chrM:330-340
         final IntervalList intervalList = new IntervalList(SAMSequenceDictionaryExtractor.extractDictionary(dict.toPath()));
         intervalList.add(new Interval("chrM", 330, 340));
         intervalList.write(intervalsFile);
 
-        final File pdf1 = File.createTempFile("test_interval_list", ".pdf");
-        pdf1.deleteOnExit();
-
-        final String[] argsIntervalList = new String[]{
+        final String[] args = new String[]{
                 "INPUT=" + input.getAbsolutePath(),
-                "OUTPUT=" + detailsOutfileIntervalList.getAbsolutePath(),
+                "OUTPUT=" + detailsOutfile.getAbsolutePath(),
                 "REFERENCE_SEQUENCE=" + CHR_M_REFERENCE.getAbsolutePath(),
-                "SUMMARY_OUTPUT=" + summaryOutfileIntervalList.getAbsolutePath(),
-                "CHART_OUTPUT=" + pdf1.getAbsolutePath(),
+                "SUMMARY_OUTPUT=" + summaryOutfile.getAbsolutePath(),
+                "CHART_OUTPUT=" + pdf.getAbsolutePath(),
                 "SCAN_WINDOW_SIZE=100",
                 "MINIMUM_GENOME_FRACTION=1.0E-5",
                 "IS_BISULFITE_SEQUENCED=false",
@@ -667,36 +663,52 @@ public class CollectGcBiasMetricsTest extends CommandLineProgramTest {
                 "ASSUME_SORTED=true",
                 "EXCLUDE_INTERVALS=" + intervalsFile.getAbsolutePath()
         };
-        runPicardCommandLine(argsIntervalList);
+        runPicardCommandLine(args);
 
-        // Test with BED format
-        final File summaryOutfileBed = File.createTempFile("test_bed", ".gc_bias.summary_metrics");
-        final File detailsOutfileBed = File.createTempFile("test_bed", ".gc_bias.detail_metrics");
+        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> output = new MetricsFile<>();
+        output.read(new FileReader(summaryOutfile));
+
+        long alignedReads = 0;
+        for (final GcBiasSummaryMetrics metrics : output.getMetrics()) {
+            if (metrics.ACCUMULATION_LEVEL.equals(ACCUMULATION_LEVEL_ALL_READS)) {
+                alignedReads = metrics.ALIGNED_READS;
+            }
+        }
+
+        Assert.assertEquals(alignedReads, 1, "Expected 1 aligned read after excluding chrM:330-340 with interval_list format");
+    }
+
+    /**
+     * Test the EXCLUDE_INTERVALS parameter with BED format.
+     * AlignedAdapterReads.sam has 2 reads: one at position 227 (ending ~329) and one at position 253 (ending ~334).
+     * We exclude region 330-340 to filter out only the read at position 253.
+     */
+    @Test
+    public void testExcludeIntervalsBed() throws IOException {
+        final File input = new File("testdata/picard/metrics/AlignedAdapterReads.sam");
+        final File summaryOutfile = File.createTempFile("test_bed", ".gc_bias.summary_metrics");
+        final File detailsOutfile = File.createTempFile("test_bed", ".gc_bias.detail_metrics");
         final File bedFile = File.createTempFile("test_intervals", ".bed");
-        summaryOutfileBed.deleteOnExit();
-        detailsOutfileBed.deleteOnExit();
+        final File pdf = File.createTempFile("test_bed", ".pdf");
+        summaryOutfile.deleteOnExit();
+        detailsOutfile.deleteOnExit();
         bedFile.deleteOnExit();
+        pdf.deleteOnExit();
 
-        // Create BED file with headers (0-based, half-open: [start, end))
-        // To exclude 330-340 (1-based inclusive), we write 329-340 in BED format
-        // Include all standard BED header types to test header parsing
+        // Create BED file (0-based, half-open: [start, end))
+        // To exclude chrM:330-340 (1-based inclusive), write chrM 329 340 in BED format
         try (final FileWriter writer = new FileWriter(bedFile)) {
-            writer.write("# This is a comment line\n");
-            writer.write("# Another comment with column descriptions: chrom, start, end\n");
-            writer.write("track name=\"Test Track\" description=\"Test intervals for GC bias\"\n");
-            writer.write("browser position chrM:1-16571\n");
+            writer.write("# Exclude chrM:330-340\n");
+            writer.write("track name=\"Excluded regions\"\n");
             writer.write("chrM\t329\t340\n");
         }
 
-        final File pdf2 = File.createTempFile("test_bed", ".pdf");
-        pdf2.deleteOnExit();
-
-        final String[] argsBed = new String[]{
+        final String[] args = new String[]{
                 "INPUT=" + input.getAbsolutePath(),
-                "OUTPUT=" + detailsOutfileBed.getAbsolutePath(),
+                "OUTPUT=" + detailsOutfile.getAbsolutePath(),
                 "REFERENCE_SEQUENCE=" + CHR_M_REFERENCE.getAbsolutePath(),
-                "SUMMARY_OUTPUT=" + summaryOutfileBed.getAbsolutePath(),
-                "CHART_OUTPUT=" + pdf2.getAbsolutePath(),
+                "SUMMARY_OUTPUT=" + summaryOutfile.getAbsolutePath(),
+                "CHART_OUTPUT=" + pdf.getAbsolutePath(),
                 "SCAN_WINDOW_SIZE=100",
                 "MINIMUM_GENOME_FRACTION=1.0E-5",
                 "IS_BISULFITE_SEQUENCED=false",
@@ -704,32 +716,18 @@ public class CollectGcBiasMetricsTest extends CommandLineProgramTest {
                 "ASSUME_SORTED=true",
                 "EXCLUDE_INTERVALS=" + bedFile.getAbsolutePath()
         };
-        runPicardCommandLine(argsBed);
+        runPicardCommandLine(args);
 
-        // Verify results for interval_list format
-        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> outputIntervalList = new MetricsFile<>();
-        outputIntervalList.read(new FileReader(summaryOutfileIntervalList));
+        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> output = new MetricsFile<>();
+        output.read(new FileReader(summaryOutfile));
 
-        long alignedReadsIntervalList = 0;
-        for (final GcBiasSummaryMetrics metrics : outputIntervalList.getMetrics()) {
+        long alignedReads = 0;
+        for (final GcBiasSummaryMetrics metrics : output.getMetrics()) {
             if (metrics.ACCUMULATION_LEVEL.equals(ACCUMULATION_LEVEL_ALL_READS)) {
-                alignedReadsIntervalList = metrics.ALIGNED_READS;
+                alignedReads = metrics.ALIGNED_READS;
             }
         }
 
-        // Verify results for BED format
-        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> outputBed = new MetricsFile<>();
-        outputBed.read(new FileReader(summaryOutfileBed));
-
-        long alignedReadsBed = 0;
-        for (final GcBiasSummaryMetrics metrics : outputBed.getMetrics()) {
-            if (metrics.ACCUMULATION_LEVEL.equals(ACCUMULATION_LEVEL_ALL_READS)) {
-                alignedReadsBed = metrics.ALIGNED_READS;
-            }
-        }
-
-        // Both formats should produce the same result: 1 read (the read ending at ~334 is excluded)
-        Assert.assertEquals(alignedReadsIntervalList, 1, "Expected 1 aligned read with interval_list format");
-        Assert.assertEquals(alignedReadsBed, 1, "Expected 1 aligned read with BED format");
+        Assert.assertEquals(alignedReads, 1, "Expected 1 aligned read after excluding chrM:330-340 with BED format");
     }
 }

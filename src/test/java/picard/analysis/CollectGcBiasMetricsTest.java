@@ -37,6 +37,7 @@ import htsjdk.samtools.util.IntervalList;
 import htsjdk.variant.utils.SAMSequenceDictionaryExtractor;
 import org.testng.Assert;
 import org.testng.annotations.BeforeTest;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 import picard.cmdline.CommandLineProgramTest;
 import picard.sam.SortSam;
@@ -571,87 +572,60 @@ public class CollectGcBiasMetricsTest extends CommandLineProgramTest {
     }
 
     /**
+     * AlignedAdapterReads.sam has 2 reads: one with MAPQ=0 and one with MAPQ=3.
+     * Returns {minMapq, expectedAlignedReads} pairs.
+     */
+    @DataProvider(name = "minimumMappingQualityData")
+    public Object[][] minimumMappingQualityData() {
+        return new Object[][]{
+                {0, 2},  // both reads pass (MAPQ=0 and MAPQ=3 both >= 0)
+                {1, 1},  // MAPQ=0 filtered, MAPQ=3 passes
+                {3, 1},  // MAPQ=0 filtered, MAPQ=3 passes (boundary: 3 >= 3)
+                {4, 0},  // both filtered (MAPQ=3 < 4)
+        };
+    }
+
+    /**
      * Test the MINIMUM_MAPPING_QUALITY (MIN_MAPQ) parameter.
      * Verifies that reads below the mapping quality threshold are excluded from analysis.
-     * AlignedAdapterReads.sam has 1 read with MAPQ=0 and 1 read with MAPQ=3.
      */
-    @Test
-    public void testMinimumMappingQuality() throws IOException {
+    @Test(dataProvider = "minimumMappingQualityData")
+    public void testMinimumMappingQuality(final int minMapq, final long expectedAlignedReads) throws IOException {
         final File input = new File("testdata/picard/metrics/AlignedAdapterReads.sam");
-        final File summaryOutfileMapq1 = File.createTempFile("test_mapq1", ".gc_bias.summary_metrics");
-        final File detailsOutfileMapq1 = File.createTempFile("test_mapq1", ".gc_bias.detail_metrics");
-        final File summaryOutfileMapq3 = File.createTempFile("test_mapq3", ".gc_bias.summary_metrics");
-        final File detailsOutfileMapq3 = File.createTempFile("test_mapq3", ".gc_bias.detail_metrics");
+        final File summaryOutfile = File.createTempFile("test_mapq" + minMapq, ".gc_bias.summary_metrics");
+        final File detailsOutfile = File.createTempFile("test_mapq" + minMapq, ".gc_bias.detail_metrics");
+        final File pdf = File.createTempFile("test_mapq" + minMapq, ".pdf");
+        summaryOutfile.deleteOnExit();
+        detailsOutfile.deleteOnExit();
+        pdf.deleteOnExit();
 
-        summaryOutfileMapq1.deleteOnExit();
-        detailsOutfileMapq1.deleteOnExit();
-        summaryOutfileMapq3.deleteOnExit();
-        detailsOutfileMapq3.deleteOnExit();
-
-        // Run with MAPQ filter >= 1 (should get 1 read: MAPQ=0 excluded, MAPQ=3 included)
-        final File pdf1 = File.createTempFile("test1", ".pdf");
-        pdf1.deleteOnExit();
-
-        final String[] argsMapq1 = new String[]{
+        final String[] args = new String[]{
                 "INPUT=" + input.getAbsolutePath(),
-                "OUTPUT=" + detailsOutfileMapq1.getAbsolutePath(),
+                "OUTPUT=" + detailsOutfile.getAbsolutePath(),
                 "REFERENCE_SEQUENCE=" + CHR_M_REFERENCE.getAbsolutePath(),
-                "SUMMARY_OUTPUT=" + summaryOutfileMapq1.getAbsolutePath(),
-                "CHART_OUTPUT=" + pdf1.getAbsolutePath(),
+                "SUMMARY_OUTPUT=" + summaryOutfile.getAbsolutePath(),
+                "CHART_OUTPUT=" + pdf.getAbsolutePath(),
                 "SCAN_WINDOW_SIZE=100",
                 "MINIMUM_GENOME_FRACTION=1.0E-5",
                 "IS_BISULFITE_SEQUENCED=false",
                 "LEVEL=ALL_READS",
                 "ASSUME_SORTED=true",
-                "MINIMUM_MAPPING_QUALITY=1"
+                "MINIMUM_MAPPING_QUALITY=" + minMapq
         };
-        runPicardCommandLine(argsMapq1);
+        runPicardCommandLine(args);
 
-        // Run with MAPQ filter >= 3 (should get 1 read: only MAPQ=3)
-        final File pdf3 = File.createTempFile("test3", ".pdf");
-        pdf3.deleteOnExit();
+        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> output = new MetricsFile<>();
+        output.read(new FileReader(summaryOutfile));
 
-        final String[] argsMapq3 = new String[]{
-                "INPUT=" + input.getAbsolutePath(),
-                "OUTPUT=" + detailsOutfileMapq3.getAbsolutePath(),
-                "REFERENCE_SEQUENCE=" + CHR_M_REFERENCE.getAbsolutePath(),
-                "SUMMARY_OUTPUT=" + summaryOutfileMapq3.getAbsolutePath(),
-                "CHART_OUTPUT=" + pdf3.getAbsolutePath(),
-                "SCAN_WINDOW_SIZE=100",
-                "MINIMUM_GENOME_FRACTION=1.0E-5",
-                "IS_BISULFITE_SEQUENCED=false",
-                "LEVEL=ALL_READS",
-                "ASSUME_SORTED=true",
-                "MINIMUM_MAPPING_QUALITY=3"
-        };
-        runPicardCommandLine(argsMapq3);
-
-        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> outputMapq1 = new MetricsFile<>();
-        outputMapq1.read(new FileReader(summaryOutfileMapq1));
-
-        final MetricsFile<GcBiasSummaryMetrics, Comparable<?>> outputMapq3 = new MetricsFile<>();
-        outputMapq3.read(new FileReader(summaryOutfileMapq3));
-
-        long alignedReadsMapq1 = 0;
-        long alignedReadsMapq3 = 0;
-
-        for (final GcBiasSummaryMetrics metrics : outputMapq1.getMetrics()) {
+        long alignedReads = 0;
+        for (final GcBiasSummaryMetrics metrics : output.getMetrics()) {
             if (metrics.ACCUMULATION_LEVEL.equals(ACCUMULATION_LEVEL_ALL_READS)) {
-                alignedReadsMapq1 = metrics.ALIGNED_READS;
+                alignedReads = metrics.ALIGNED_READS;
             }
         }
 
-        for (final GcBiasSummaryMetrics metrics : outputMapq3.getMetrics()) {
-            if (metrics.ACCUMULATION_LEVEL.equals(ACCUMULATION_LEVEL_ALL_READS)) {
-                alignedReadsMapq3 = metrics.ALIGNED_READS;
-            }
-        }
-
-        // AlignedAdapterReads.sam has 1 read with MAPQ=0 and 1 read with MAPQ=3
-        // With MIN_MAPQ=1, we should get 1 read (MAPQ=0 filtered out, MAPQ=3 included)
-        // With MIN_MAPQ=3, we should get 1 read (only the MAPQ=3 read)
-        Assert.assertEquals(alignedReadsMapq1, 1, "Expected 1 aligned read with MAPQ >= 1");
-        Assert.assertEquals(alignedReadsMapq3, 1, "Expected 1 aligned read with MAPQ >= 3");
+        Assert.assertEquals(alignedReads, expectedAlignedReads,
+                "Expected " + expectedAlignedReads + " aligned reads with MINIMUM_MAPPING_QUALITY=" + minMapq);
     }
 
     /**

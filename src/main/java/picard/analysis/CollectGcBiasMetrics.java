@@ -38,7 +38,7 @@ import htsjdk.samtools.util.Log;
 import org.broadinstitute.barclay.argparser.Argument;
 import org.broadinstitute.barclay.argparser.CommandLineProgramProperties;
 import org.broadinstitute.barclay.help.DocumentedFeature;
-import picard.util.BedToIntervalList;
+import picard.util.IntervalFileReader;
 import picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup;
 import picard.metrics.GcBiasMetrics;
 import picard.util.RExecutor;
@@ -191,7 +191,7 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
             IOUtil.assertFileIsReadable(EXCLUDE_INTERVALS);
             // Always buffer content and detect format by examining the first line.
             // This works for both regular files and special files (pipes, FIFOs, process substitutions).
-            intervalsToExclude = BedToIntervalList.loadIntervals(EXCLUDE_INTERVALS, header.getSequenceDictionary());
+            intervalsToExclude = IntervalFileReader.loadIntervals(EXCLUDE_INTERVALS, header.getSequenceDictionary());
 
             // Log information about excluded regions
             final int numExcludedRegions = intervalsToExclude.getIntervals().size();
